@@ -11,35 +11,42 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""E2E Tests for tfx.examples.penguin.penguin_pipeline_local_infraval."""
+"""E2E Tests for tfx.examples.penguin.penguin_pipeline_local."""
 
 import os
 from typing import Text
 import unittest
 
+from absl import logging
 import tensorflow as tf
 
-from tfx.dsl.components.base import base_driver
 from tfx.dsl.io import fileio
-from tfx.examples.penguin import penguin_pipeline_local_infraval
+from tfx.examples.penguin import penguin_pipeline_local
 from tfx.orchestration import metadata
 from tfx.orchestration.local.local_dag_runner import LocalDagRunner
 
 
 @unittest.skipIf(tf.__version__ < '2',
                  'Uses keras Model only compatible with TF 2.x')
-class PenguinPipelineLocalInfravalEndToEndTest(tf.test.TestCase):
+class PenguinPipelineLocalEndToEndTest(tf.test.TestCase):
 
   def setUp(self):
-    super(PenguinPipelineLocalInfravalEndToEndTest, self).setUp()
+    super(PenguinPipelineLocalEndToEndTest, self).setUp()
+
+    try:
+      import flax  # pylint: disable=g-import-not-at-top
+    except ImportError:
+      raise unittest.SkipTest('flax is not installed. Skipping test.')
+
     self._test_dir = os.path.join(
         os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', self.get_temp_dir()),
         self._testMethodName)
 
     self._pipeline_name = 'penguin_test'
     self._data_root = os.path.join(os.path.dirname(__file__), 'data')
+
     self._module_file = os.path.join(
-        os.path.dirname(__file__), 'penguin_utils_keras.py')
+        os.path.dirname(__file__), 'penguin_utils_flax.py')
     self._serving_model_dir = os.path.join(self._test_dir, 'serving_model')
     self._pipeline_root = os.path.join(self._test_dir, 'tfx', 'pipelines',
                                        self._pipeline_name)
@@ -53,45 +60,37 @@ class PenguinPipelineLocalInfravalEndToEndTest(tf.test.TestCase):
     outputs = fileio.listdir(component_path)
     for output in outputs:
       execution = fileio.listdir(os.path.join(component_path, output))
-      self.assertEqual(1, len(execution))
+      self.assertLen(execution, 1)
 
-  def assertInfraValidatorPassed(self) -> None:
-    infra_validator_path = os.path.join(self._pipeline_root, 'InfraValidator')
-    blessing_path = os.path.join(self._pipeline_root, 'InfraValidator',
-                                 'blessing')
-    executions = fileio.listdir(blessing_path)
-    self.assertGreaterEqual(len(executions), 1)
-    for exec_id in executions:
-      blessing_uri = base_driver._generate_output_uri(  # pylint: disable=protected-access
-          infra_validator_path, 'blessing', exec_id)
-      blessed = os.path.join(blessing_uri, 'INFRA_BLESSED')
-      self.assertTrue(fileio.exists(blessed))
-
-  def assertPipelineExecution(self) -> None:
+  def assertPipelineExecution(self, has_tuner: bool) -> None:
     self.assertExecutedOnce('CsvExampleGen')
     self.assertExecutedOnce('Evaluator')
     self.assertExecutedOnce('ExampleValidator')
-    self.assertExecutedOnce('InfraValidator')
     self.assertExecutedOnce('Pusher')
     self.assertExecutedOnce('SchemaGen')
     self.assertExecutedOnce('StatisticsGen')
     self.assertExecutedOnce('Trainer')
     self.assertExecutedOnce('Transform')
+    if has_tuner:
+      self.assertExecutedOnce('Tuner')
 
   def testPenguinPipelineLocal(self):
-    LocalDagRunner().run(
-        penguin_pipeline_local_infraval._create_pipeline(
-            pipeline_name=self._pipeline_name,
-            data_root=self._data_root,
-            module_file=self._module_file,
-            serving_model_dir=self._serving_model_dir,
-            pipeline_root=self._pipeline_root,
-            metadata_path=self._metadata_path,
-            beam_pipeline_args=[]))
+    pipeline = penguin_pipeline_local._create_pipeline(
+        pipeline_name=self._pipeline_name,
+        data_root=self._data_root,
+        module_file=self._module_file,
+        serving_model_dir=self._serving_model_dir,
+        pipeline_root=self._pipeline_root,
+        metadata_path=self._metadata_path,
+        enable_tuning=False,
+        beam_pipeline_args=[])
+
+    logging.info('Starting the first pipeline run.')
+    LocalDagRunner().run(pipeline)
 
     self.assertTrue(fileio.exists(self._serving_model_dir))
     self.assertTrue(fileio.exists(self._metadata_path))
-    expected_execution_count = 10  # 9 components + 1 resolver
+    expected_execution_count = 9  # 8 components + 1 resolver
     metadata_config = metadata.sqlite_metadata_connection_config(
         self._metadata_path)
     with metadata.Metadata(metadata_config) as m:
@@ -100,45 +99,27 @@ class PenguinPipelineLocalInfravalEndToEndTest(tf.test.TestCase):
       self.assertGreaterEqual(artifact_count, execution_count)
       self.assertEqual(expected_execution_count, execution_count)
 
-    self.assertPipelineExecution()
-    self.assertInfraValidatorPassed()
+    self.assertPipelineExecution(False)
 
-    # Runs pipeline the second time.
-    LocalDagRunner().run(
-        penguin_pipeline_local_infraval._create_pipeline(
-            pipeline_name=self._pipeline_name,
-            data_root=self._data_root,
-            module_file=self._module_file,
-            serving_model_dir=self._serving_model_dir,
-            pipeline_root=self._pipeline_root,
-            metadata_path=self._metadata_path,
-            beam_pipeline_args=[]))
+    logging.info('Starting the second pipeline run. All components except '
+                 'Evaluator and Pusher will use cached results.')
+    LocalDagRunner().run(pipeline)
 
-    # All executions but Evaluator and Pusher are cached.
     with metadata.Metadata(metadata_config) as m:
       # Artifact count is increased by 3 caused by Evaluator and Pusher.
-      self.assertEqual(artifact_count + 3, len(m.store.get_artifacts()))
+      self.assertLen(m.store.get_artifacts(), artifact_count + 3)
       artifact_count = len(m.store.get_artifacts())
-      self.assertEqual(expected_execution_count * 2,
-                       len(m.store.get_executions()))
+      self.assertLen(m.store.get_executions(), expected_execution_count * 2)
 
-    # Runs pipeline the third time.
-    LocalDagRunner().run(
-        penguin_pipeline_local_infraval._create_pipeline(
-            pipeline_name=self._pipeline_name,
-            data_root=self._data_root,
-            module_file=self._module_file,
-            serving_model_dir=self._serving_model_dir,
-            pipeline_root=self._pipeline_root,
-            metadata_path=self._metadata_path,
-            beam_pipeline_args=[]))
+    logging.info('Starting the third pipeline run. '
+                 'All components will use cached results.')
+    LocalDagRunner().run(pipeline)
 
     # Asserts cache execution.
     with metadata.Metadata(metadata_config) as m:
       # Artifact count is unchanged.
-      self.assertEqual(artifact_count, len(m.store.get_artifacts()))
-      self.assertEqual(expected_execution_count * 3,
-                       len(m.store.get_executions()))
+      self.assertLen(m.store.get_artifacts(), artifact_count)
+      self.assertLen(m.store.get_executions(), expected_execution_count * 3)
 
 
 if __name__ == '__main__':

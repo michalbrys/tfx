@@ -41,7 +41,7 @@ class PenguinPipelineLocalEndToEndTest(tf.test.TestCase):
     self._data_root = os.path.join(os.path.dirname(__file__), 'data')
 
     self._module_file = os.path.join(
-        os.path.dirname(__file__), 'penguin_utils.py')
+        os.path.dirname(__file__), 'penguin_utils_keras.py')
     self._serving_model_dir = os.path.join(self._test_dir, 'serving_model')
     self._pipeline_root = os.path.join(self._test_dir, 'tfx', 'pipelines',
                                        self._pipeline_name)
@@ -55,7 +55,7 @@ class PenguinPipelineLocalEndToEndTest(tf.test.TestCase):
     outputs = fileio.listdir(component_path)
     for output in outputs:
       execution = fileio.listdir(os.path.join(component_path, output))
-      self.assertEqual(1, len(execution))
+      self.assertLen(execution, 1)
 
   def assertPipelineExecution(self, has_tuner: bool) -> None:
     self.assertExecutedOnce('CsvExampleGen')
@@ -102,10 +102,9 @@ class PenguinPipelineLocalEndToEndTest(tf.test.TestCase):
 
     with metadata.Metadata(metadata_config) as m:
       # Artifact count is increased by 3 caused by Evaluator and Pusher.
-      self.assertEqual(artifact_count + 3, len(m.store.get_artifacts()))
+      self.assertLen(m.store.get_artifacts(), artifact_count + 3)
       artifact_count = len(m.store.get_artifacts())
-      self.assertEqual(expected_execution_count * 2,
-                       len(m.store.get_executions()))
+      self.assertLen(m.store.get_executions(), expected_execution_count * 2)
 
     logging.info('Starting the third pipeline run. '
                  'All components will use cached results.')
@@ -114,9 +113,8 @@ class PenguinPipelineLocalEndToEndTest(tf.test.TestCase):
     # Asserts cache execution.
     with metadata.Metadata(metadata_config) as m:
       # Artifact count is unchanged.
-      self.assertEqual(artifact_count, len(m.store.get_artifacts()))
-      self.assertEqual(expected_execution_count * 3,
-                       len(m.store.get_executions()))
+      self.assertLen(m.store.get_artifacts(), artifact_count)
+      self.assertLen(m.store.get_executions(), expected_execution_count * 3)
 
   def testPenguinPipelineLocalWithTuner(self):
     LocalDagRunner().run(
